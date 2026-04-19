@@ -146,7 +146,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Cream directoarele daca nu exista (silentios)
+    // Cream directoarele daca nu exista 
     init_district_if_needed(target_district);
 
     if (strcmp(action, "add") == 0) {
@@ -155,7 +155,7 @@ int main(int argc, char *argv[]) {
 
         if (!check_permission(path, current_role, 0, 1)) return 1;
 
-        // Declaram si curatam complet structura cu 0 pentru un HEX dump `xxd` curat
+        // Declaram si curatam complet structura cu 0 pentru un HEX dump `xxd` 
         Report new_report;
         memset(&new_report, 0, sizeof(Report));
 
