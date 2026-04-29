@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>  // Pentru waitpid()
+#include <signal.h>    // Pentru kill()
 #include <time.h>
 #include <errno.h>
 
@@ -89,7 +91,6 @@ void log_action(const char* district, UserRole role, const char* username, const
     if (fd != -1) {
         char buffer[512];
         char* role_str = (role == ROLE_MANAGER) ? "manager" : "inspector";
-        // Ordine corectata conform imaginii: Timestamp, User, Rol, Actiune
         int len = snprintf(buffer, sizeof(buffer), "%ld\t%s\t%s\t%s\n", (long)time(NULL), username, role_str, action);
         write(fd, buffer, len);
         close(fd);
@@ -209,7 +210,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    init_district_if_needed(target_district);
+    // Nu initializam / nu re-cream folderul daca il stergem fix acum
+    if (strcmp(action, "remove_district") != 0) {
+        init_district_if_needed(target_district);
+    }
+
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%s/reports.dat", target_district);
 
@@ -218,14 +223,12 @@ int main(int argc, char *argv[]) {
         if (!check_permission(path, current_role, 0, 1)) return 1;
 
         Report new_report;
-        memset(&new_report, 0, sizeof(Report)); // curatam cu 0 pentru HEX curat
+        memset(&new_report, 0, sizeof(Report));
 
-        // Atribuim id si detalii logice (nu apar in screenshot, dar sunt necesare intern)
         new_report.id = (int)time(NULL) % 100000;
         strncpy(new_report.inspector_name, current_user, MAX_NAME - 1);
         new_report.timestamp = time(NULL);
 
-        // --- Afisari exact ca in screenshot-ul tau ---
         printf("X: ");
         if (scanf("%f", &new_report.latitude) != 1) return 1;
 
@@ -239,9 +242,7 @@ int main(int argc, char *argv[]) {
         if (scanf("%d", &new_report.severity) != 1) return 1;
 
         printf("Description:");
-        // Consumam caracterul newline lasat in buffer
         int c; while ((c = getchar()) != '\n' && c != EOF);
-
         if (fgets(new_report.description, MAX_DESC, stdin)) {
             new_report.description[strcspn(new_report.description, "\n")] = 0;
         }
@@ -250,8 +251,26 @@ int main(int argc, char *argv[]) {
         if (fd != -1) {
             write(fd, &new_report, sizeof(Report));
             close(fd);
-            log_action(target_district, current_role, current_user, "add");
-            // FARA afisari suplimentare! Terminalul tau isi va da direct exit aici ca in poza.
+
+            // --- Phase 2: Notificarea monitor_reports ---
+            FILE *pid_file = fopen(".monitor_pid", "r");
+            int monitor_pid = -1;
+            int notification_success = 0;
+
+            if (pid_file) {
+                if (fscanf(pid_file, "%d", &monitor_pid) == 1) {
+                    if (kill(monitor_pid, SIGUSR1) == 0) {
+                        notification_success = 1;
+                    }
+                }
+                fclose(pid_file);
+            }
+
+            if (notification_success) {
+                log_action(target_district, current_role, current_user, "add (monitor notified successfully)");
+            } else {
+                log_action(target_district, current_role, current_user, "add (failed to inform monitor)");
+            }
         }
     }
     // ACTION: LIST
@@ -394,6 +413,42 @@ int main(int argc, char *argv[]) {
             }
             close(fd);
             log_action(target_district, current_role, current_user, "filter");
+        }
+    }
+    // --- Phase 2: ACTION: REMOVE_DISTRICT ---
+    else if (strcmp(action, "remove_district") == 0) {
+        if (current_role != ROLE_MANAGER) {
+            fprintf(stderr, "Permission denied: Only managers can remove districts.\n");
+            return 1;
+        }
+
+        // 1. Stergem symlink-ul folosind unlink()
+        char symlink_name[MAX_PATH];
+        snprintf(symlink_name, sizeof(symlink_name), "active_reports-%s", target_district);
+        unlink(symlink_name);
+
+        // 2. Creare proces copil folosind fork()
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("Fork failed");
+            return 1;
+        } else if (pid == 0) {
+            // Suntem in procesul copil, rulam comanda externa folosind exec*
+            // ATENTIE: target_district e parametrul!
+            execlp("rm", "rm", "-rf", target_district, NULL);
+            // Daca ajungem aici, exec a esuat
+            perror("Exec failed");
+            exit(1);
+        } else {
+            // Suntem in procesul parinte, asteptam finalizarea procesului copil
+            int status;
+            waitpid(pid, &status, 0);
+
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                printf("District '%s' successfully removed.\n", target_district);
+            } else {
+                fprintf(stderr, "Failed to fully remove district '%s'.\n", target_district);
+            }
         }
     }
 
